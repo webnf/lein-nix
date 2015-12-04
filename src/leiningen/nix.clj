@@ -3,6 +3,7 @@
    [clojure.java.shell :refer [sh]]
    [clojure.java.io :as io]
    [clojure.string :as str]
+   [leiningen.jar :as jar]
    [leiningen.core.classpath :as cp]
    [leiningen.core.eval :as eval]
    [leiningen.core.main :as main]
@@ -56,15 +57,19 @@
        (pprint o)))
    #"\n" (apply str "\n" (repeat indent \space))))
 
+(defn project-jar [project]
+  (let [res (jar/jar (assoc project :auto-clean false))]
+    (when-not (= 1 (count res))
+      (throw (ex-info "Multiple Artifacts" {:res res :project project})))
+    (second (first res))))
+
 (defn render-classpath [project indent]
   (concat
    ["["]
    (interleave
     (repeat (apply str \newline (repeat (+ 2 indent) \space)))
-    (for [p (concat
-             (:source-paths project)
-             (:resource-paths project)
-             [(:compile-path project)]
+    (for [p (cons
+             (project-jar project)
              (for [dep (cp/resolve-dependencies :dependencies project)]
                (.getAbsolutePath ^java.io.File dep)))
           :when (.exists (io/file p))]
@@ -86,7 +91,7 @@
       (apply str (repeat (+ 4 indent) \space))
       (pprint-code init-form (+ 4 indent)) \newline
       indent-s "'';\n"
-      indent-s "javaArgs = " (pr-str java-args) ";\n"
+      indent-s "javaArgs = " (pr-str (vec java-args)) ";\n"
       indent-s "classpath = "]
      (render-classpath project (+ 2 indent))
      [";\n" (apply str (repeat indent \space)) "}"])))
@@ -151,22 +156,3 @@
     (.write *out* out)
     (.flush *out*)))
 
-#_(defn nix [project task-name & args]
-    (let [{:keys [init-form java-args]} (init-trampoline project task-name args)]
-      (println "{")
-      (println (str "  version = \"" (:version project) "\";"))
-      (println "  initForm = ''")
-      (println "   " (pprint-code init-form 4))
-      (println "  '';")
-      (println (str "  javaArgs = " (pr-str java-args) ";"))
-      (println "  classpath = ''")
-      (doseq [p (concat
-                 (:source-paths project)
-                 (:resource-paths project)
-                 [(:compile-path project)]
-                 (for [dep (cp/resolve-dependencies :dependencies project)]
-                   (.getAbsolutePath dep)))]
-        (when (.exists (io/file p))
-          (println "    ${" p "}")))
-      (println "  '';")
-      (println "}")))
