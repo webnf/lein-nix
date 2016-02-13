@@ -10,10 +10,11 @@
    [leiningen.core.project :as prj]
    [leiningen.deps :as deps]
    [leiningen.trampoline :as tramp]
-   [clojure.pprint :refer [pprint with-pprint-dispatch code-dispatch]])
-  #_([webnf.base :refer [pr-cls]]
-     [cemerick.pomegranate.aether :as aether]
-     [clojure.pprint :refer [pprint]]))
+   [clojure.pprint :refer [pprint with-pprint-dispatch code-dispatch]]
+   [nix.data :as nd]
+   #_([webnf.base :refer [pr-cls]]
+      [cemerick.pomegranate.aether :as aether]
+      [clojure.pprint :refer [pprint]])))
 
 #_(defn flatten-hierarchy [h]
     (when h
@@ -36,6 +37,42 @@
      :repositories (:repositories prj)
      :coordinates (get prj dep-key)))
 
+(defn pprint-code [o]
+  (with-out-str
+    (with-pprint-dispatch
+      code-dispatch
+      (pprint o))))
+
+(def devnull (java.io.PrintWriter.
+              (io/writer "/dev/null")))
+
+(defn project-jar [project]
+  (let [res (binding [*out* devnull]
+              (jar/jar (assoc project :auto-clean false)))]
+    (when-not (= 1 (count res))
+      (throw (ex-info "Multiple Artifacts" {:res res :project project})))
+    (second (first res))))
+
+(defn render-classpath
+  ([project] (render-classpath project false))
+  ([project mutable-src]
+   (vec (nd/inc-indent
+         (interleave
+          (repeat (nd/fragment (cons "\n" nd/*indent*)))
+          (if mutable-src
+            (concat
+             (map #(str (.getAbsolutePath (io/file %)) "/")
+                  (concat (:source-paths project)
+                          (:resource-paths project)))
+             (for [p (cp/resolve-dependencies :dependencies project)
+                   :when (.exists (io/file p))]
+               (nd/path p)))
+            (for [p (cons
+                     (project-jar project)
+                     (cp/resolve-dependencies :dependencies project))
+                  :when (.exists (io/file p))]
+              (nd/path p))))))))
+
 (defn init-trampoline [project task-name args]
   (binding [tramp/*trampoline?* true]
     (main/apply-task (main/lookup-alias task-name project)
@@ -47,54 +84,25 @@
     {:init-form (concat '(do)
                         (map first forms)
                         (mapcat rest forms))
+     :classpath (render-classpath @eval/trampoline-project)
      :java-args (:jvm-opts @eval/trampoline-project)}))
-
-(defn pprint-code [o indent]
-  (str/replace
-   (with-out-str
-     (with-pprint-dispatch
-       code-dispatch
-       (pprint o)))
-   #"\n" (apply str "\n" (repeat indent \space))))
-
-(defn project-jar [project]
-  (let [res (jar/jar (assoc project :auto-clean false))]
-    (when-not (= 1 (count res))
-      (throw (ex-info "Multiple Artifacts" {:res res :project project})))
-    (second (first res))))
-
-(defn render-classpath [project indent]
-  (concat
-   ["["]
-   (interleave
-    (repeat (apply str \newline (repeat (+ 2 indent) \space)))
-    (for [p (cons
-             (project-jar project)
-             (for [dep (cp/resolve-dependencies :dependencies project)]
-               (.getAbsolutePath ^java.io.File dep)))
-          :when (.exists (io/file p))]
-      p))
-   [\newline (apply str (repeat indent \space)) "]"]))
 
 (defn project-name [project]
   (or (:deploy-name project)
       (name (:name project))))
 
-(defn render-task [project task-name args indent]
-  (let [{:keys [init-form java-args]} (init-trampoline project task-name args)
-        indent-s (apply str (repeat (+ 2 indent) \space))]
-    (concat
-     ["{" \newline
-      indent-s "name = \"" (project-name project) "\";\n"
-      indent-s "version = \"" (:version project) "\";\n"
-      indent-s "initForm = ''\n"
-      (apply str (repeat (+ 4 indent) \space))
-      (pprint-code init-form (+ 4 indent)) \newline
-      indent-s "'';\n"
-      indent-s "javaArgs = " (pr-str (vec java-args)) ";\n"
-      indent-s "classpath = "]
-     (render-classpath project (+ 2 indent))
-     [";\n" (apply str (repeat indent \space)) "}"])))
+(defn render-task [project task-name args]
+  (let [{:keys [init-form java-args classpath]} (init-trampoline project task-name args)]
+    {:name (project-name project)
+     :version (:version project)
+     :initForm (nd/ppstr (pprint-code init-form))
+     :javaArgs (vec java-args)
+     :classpath classpath}))
+
+(defn render-package [project prj-keys]
+  {:name (project-name project)
+   :version (:version project)
+   :package (nd/ppstr (pr-str (select-keys project prj-keys)))})
 
 (defn nix-build! [wd eval-str out-link]
   (let [args ["-E" (str "with import <nixpkgs> {}; " eval-str)
@@ -123,22 +131,35 @@
       (.write w (str s)))))
 
 (defn target-path! [project]
-  (let [d (io/file (:target-path project) "lein-nix")]
-    (.mkdirs d)
+  (let [d (io/file (:target-path project) "lein-nix")
+        res (.mkdirs d)]
+    (.write *err* (str "MKDIR " d " => " res "\n"))
     (str d)))
 
-(defn nix-classpath [project]
+(defn nix-classpath
+  ([project] (nix-classpath project false))
+  ([project mutable-src]
+   (let [tp (target-path! project)]
+     (render-target! project "classpath.nix" (nd/render (render-classpath project mutable-src)))
+     (nix-build! tp
+                 (str "writeText \"" (project-name project)
+                      "-classpath\" (lib.concatStringsSep \"\n\" (import ./classpath.nix))")
+                 "classpath-link"))))
+
+(defn nix-package [project & prj-keys]
   (let [tp (target-path! project)]
-    (render-target! project "classpath.nix" (render-classpath project 0))
-    (nix-build! tp
-                (str "writeText \"" (project-name project)
-                     "-classpath\" (lib.concatStringsSep \"\n\" (import ./classpath.nix))")
-                "classpath-link")))
+    (render-target! project "descriptor.nix"
+                    (nd/render (render-package project (map keyword prj-keys))))
+    (render-target! project "classpath.nix"
+                    (nd/render (render-classpath project)))
+    (io/copy
+     (io/reader (io/resource "lein-nix/package.nix"))
+     (io/file tp "package.nix"))
+    (nix-build-pkg! tp "./package.nix" "package-link")))
 
 (defn nix-task [project task-name & args]
   (let [tp (target-path! project)]
-    (render-target! project "descriptor.nix" (render-task project task-name args 0))
-    (render-target! project "classpath.nix" (render-classpath project 0))
+    (render-target! project "descriptor.nix" (nd/render (render-task project task-name args)))
     (io/copy
      (io/reader (io/resource "lein-nix/task.nix"))
      (io/file tp "task.nix"))
@@ -147,12 +168,25 @@
      (io/file tp "start.tmpl.sh"))
     (nix-build-pkg! tp "./task.nix" "task-link")))
 
+;; nix-build support
+
+(defn nix-build-classpath [project target]
+  (spit target (nd/render (render-classpath project))))
+
 (defn nix [project task & args]
-  {:subtasks [#'nix-task #'nix-classpath]}
-  (let [out (case task
-              "task" (apply nix-task project args)
-              "classpath" (apply nix-classpath project args))]
+  {:subtasks [#'nix-task #'nix-classpath #'nix-package]}
+  (let [out (apply (case task
+                     "task" nix-task
+                     "classpath" nix-classpath
+                     "package" nix-package
+                     "build-classpath" nix-build-classpath
+                     "dev-classpath" #(nix-classpath % true))
+                   project args)]
     (.flush *err*)
     (.write *out* out)
     (.flush *out*)))
 
+(comment
+  (def prj (prj/read "/home/herwig/src/cc.bendlas.net/project.clj"))
+  (def prj (prj/read "/home/herwig/src/hdnews.bendlas.net/project.clj"))
+  )
