@@ -1,4 +1,5 @@
-with import <nixpkgs> {};
+with import <nixpkgs> {}; callPackage ./lein-nix.nix {}
+/*
 let
 
   lein-jar = "${leiningen}/share/java/${leiningen.name}-standalone.jar";
@@ -32,3 +33,4 @@ in {
     ##  lein $profile_opts nix build-classpath $out
     
 }
+*/

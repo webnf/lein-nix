@@ -47,11 +47,24 @@
               (io/writer "/dev/null")))
 
 (defn project-jar [project]
-  (let [res (binding [*out* devnull]
+  (let [res (binding [*out* *err*]
               (jar/jar (assoc project :auto-clean false)))]
     (when-not (= 1 (count res))
       (throw (ex-info "Multiple Artifacts" {:res res :project project})))
     (second (first res))))
+
+(defn dev-paths [project]
+  (map #(str (.getAbsolutePath (io/file %)) "/")
+       (concat (:source-paths project)
+               (:resource-paths project))))
+
+(defn project-dep-paths [project]
+  (for [p (cp/resolve-dependencies :dependencies project)
+        :when (.exists (io/file p))]
+    (nd/path p)))
+
+(defn project-jar-path [project]
+  (nd/path (project-jar project)))
 
 (defn render-classpath
   ([project] (render-classpath project false))
@@ -61,31 +74,29 @@
           (repeat (nd/fragment (cons "\n" nd/*indent*)))
           (if mutable-src
             (concat
-             (map #(str (.getAbsolutePath (io/file %)) "/")
-                  (concat (:source-paths project)
-                          (:resource-paths project)))
-             (for [p (cp/resolve-dependencies :dependencies project)
-                   :when (.exists (io/file p))]
-               (nd/path p)))
-            (for [p (cons
-                     (project-jar project)
-                     (cp/resolve-dependencies :dependencies project))
-                  :when (.exists (io/file p))]
-              (nd/path p))))))))
+             (dev-paths project)
+             (project-dep-paths project))
+            (cons
+             (project-jar-path project)
+             (project-dep-paths project))))))))
 
 (defn init-trampoline [project task-name args]
-  (binding [tramp/*trampoline?* true]
-    (main/apply-task (main/lookup-alias task-name project)
-                     (-> (assoc project :eval-in :trampoline)
-                         (vary-meta update-in [:without-profiles] assoc
-                                    :eval-in :trampoline))
-                     args))
-  (let [forms (map rest @eval/trampoline-forms)]
-    {:init-form (concat '(do)
-                        (map first forms)
-                        (mapcat rest forms))
-     :classpath (render-classpath @eval/trampoline-project)
-     :java-args (:jvm-opts @eval/trampoline-project)}))
+  (locking #'tramp/*trampoline?*
+    (binding [tramp/*trampoline?* true]
+      (reset! eval/trampoline-project nil)
+      (reset! eval/trampoline-forms [])
+      (reset! eval/trampoline-profiles [])
+      (main/apply-task (main/lookup-alias task-name project)
+                       (-> (assoc project :eval-in :trampoline)
+                           (vary-meta update-in [:without-profiles] assoc
+                                      :eval-in :trampoline))
+                       args))
+    (let [forms (map rest @eval/trampoline-forms)]
+      {:init-form (concat '(do)
+                          (map first forms)
+                          (mapcat rest forms))
+       :classpath (render-classpath @eval/trampoline-project)
+       :java-args (:jvm-opts @eval/trampoline-project)})))
 
 (defn project-name [project]
   (or (:deploy-name project)
@@ -168,6 +179,9 @@
      (io/file tp "start.tmpl.sh"))
     (nix-build-pkg! tp "./task.nix" "task-link")))
 
+(defn nix-descriptor [project task-name & args]
+  )
+
 ;; nix-build support
 
 (defn nix-build-classpath [project target]
@@ -180,8 +194,10 @@
                      "classpath" nix-classpath
                      "package" nix-package
                      "build-classpath" nix-build-classpath
-                     "dev-classpath" #(nix-classpath % true))
+                     "dev-classpath" #(nix-classpath % true)
+                     "descriptor" nix-descriptor)
                    project args)]
+    (.write *err* "LEIN NIX CALLED\n")
     (.flush *err*)
     (.write *out* out)
     (.flush *out*)))

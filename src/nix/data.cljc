@@ -93,6 +93,13 @@
    (apply concat (interpose [" "] (map emit-expr exprs)))
    [")"]))
 
+(defn as-map [v]
+  (fragment (emit-map v)))
+(defn as-vec [v]
+  (fragment (emit-vec v)))
+(defn as-call [v]
+  (fragment (emit-call v)))
+
 #?(:clj (extend-protocol NixExpr
           clojure.lang.APersistentVector
           (emit-expr [v] (emit-vec v))
