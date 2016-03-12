@@ -75,6 +75,8 @@
           (if mutable-src
             (concat
              (dev-paths project)
+             ;; FIXME only override depencencies of project
+             (apply concat (vals mutable-src))
              (project-dep-paths project))
             (cons
              (project-jar-path project)
@@ -194,10 +196,10 @@
                      "classpath" nix-classpath
                      "package" nix-package
                      "build-classpath" nix-build-classpath
-                     "dev-classpath" #(nix-classpath % true)
+                     "dev-classpath" #(nix-classpath %1 (read-string %2))
                      "descriptor" nix-descriptor)
                    project args)]
-    (.write *err* "LEIN NIX CALLED\n")
+    (.write *err* (str "LEIN NIX CALLED " (apply pr-str task args) "\n"))
     (.flush *err*)
     (.write *out* out)
     (.flush *out*)))
