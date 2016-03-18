@@ -2,14 +2,18 @@
   (:require [clojure.java.io :as io]
             [clojure.set :as set]
             [clojure.string :as str]
-            [cemerick.pomegranate.aether :as aether])
-  (:import  (org.sonatype.aether.resolution
+            [leiningen.nix.aether-impl :as aether])
+  (:import  (org.eclipse.aether.resolution
              ArtifactDescriptorRequest
              MetadataRequest)
-            (org.sonatype.aether.util.metadata
-             DefaultMetadata)
-            (org.sonatype.aether.metadata
-             Metadata$Nature)))
+            (org.eclipse.aether.metadata
+             DefaultMetadata Metadata$Nature)
+            #_(org.eclipse.aether.internal.impl
+             DefaultRepositoryLayoutProvider)))
+
+
+#_(def lp (DefaultRepositoryLayoutProvider.))
+
 
 (defn run-with-session [{:keys [repositories coordinates files retrieve local-repo
                                 transfer-listener offline? proxy mirrors repository-session-fn]}
@@ -82,12 +86,23 @@
       '[[org.eclipse.jetty/jetty-webapp "9.3.6.v20151106"]])))
 
   (.getManagedDependencies ad)
-  (.getDependencies ad)
+  (.getDependencies )
   (.getProperties ad)
 
   (def am
     (metadata
      :coordinates
      '[[org.eclipse.jetty/jetty-webapp "9.3.6.v20151106"]]))
+
+  (def lo (run-with-session
+           {:coordinates
+            '[[org.eclipse.jetty/jetty-webapp "9.3.6.v20151106"]]}
+           (fn [system session repos]
+             (println repos)
+             (.. (org.eclipse.aether.internal.impl.Maven2RepositoryLayoutFactory.)
+                 (newInstance session (first repos))))))
   
+  (.getLocation lo (.getArtifact ad) false)
+
+
   )
