@@ -66,6 +66,24 @@
 (defn project-jar-path [project]
   (nd/path (project-jar project)))
 
+(defn nix-prefetch! [file]
+  (let [{:keys [exit out err] :as res} (sh "nix-prefetch-url" (str "file://" (.getAbsolutePath file)))]
+    (.println *err* (str "nix-prefetch-url file://" (.getAbsolutePath file) " => " (pr-str res)))
+    (if (zero? exit)
+      (str/trim out)
+      (throw (ex-info err res)))))
+
+(defn render-deps [project]
+  (reduce (fn [deps [coord version]]
+            #_(assoc-in deps [(or (namespace coord) (name coord))
+                              (name coord)]
+                        version
+                        #_{:sha256 (nix-prefetch! (:file (meta dep)))})
+            (conj deps [(or (namespace coord) (name coord))
+                        (name coord)
+                        version]))
+          [] (:dependencies project) #_(cp/get-dependencies :dependencies project)))
+
 (defn render-classpath
   ([project] (render-classpath project false))
   ([project mutable-src]
@@ -181,8 +199,10 @@
      (io/file tp "start.tmpl.sh"))
     (nix-build-pkg! tp "./task.nix" "task-link")))
 
-(defn nix-descriptor [project task-name & args]
-  )
+(defn nix-descriptor [project]
+  (target-path! project)
+  (render-target! project "deps.nix"
+                  (nd/render (render-deps project))))
 
 ;; nix-build support
 
@@ -207,4 +227,7 @@
 (comment
   (def prj (prj/read "/home/herwig/src/cc.bendlas.net/project.clj"))
   (def prj (prj/read "/home/herwig/src/hdnews.bendlas.net/project.clj"))
+  (def prj (prj/read "/home/herwig/checkout/bendlas.net/lib/davstore/project.clj"))
+
+  (nix-descriptor prj)
   )
