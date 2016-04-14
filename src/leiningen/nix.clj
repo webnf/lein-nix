@@ -209,20 +209,47 @@
 (defn nix-build-classpath [project target]
   (spit target (nd/render (render-classpath project))))
 
-(defn nix [project task & args]
+(defn nix-preload [project preload-ns]
+  (with-open [dn (java.io.PrintStream. (io/output-stream "/dev/null"))
+              dnw (io/writer "/dev/null")]
+    (let [out System/out
+          err System/err]
+      (try
+        (System/setOut dn)
+        (System/setErr dn)
+        (binding [*out* dnw
+                  *err* dnw]
+          (main/resolve-and-apply project ())
+          (doseq [n preload-ns]
+            (require preload-ns))
+          (System/gc))
+        (finally (System/setOut out)
+                 (System/setErr err)))))
+  (.write *out* "READY FOR RESUME\n")
+  (.flush *out*)
+  (let [args (read (java.io.PushbackReader. *in*))]
+    (println "Resuming with" args \newline
+             "  in" (.getAbsolutePath (io/file ".")))
+    (apply main/-main args)))
+
+(defn ^:no-project-needed nix
+  [project task & args]
   {:subtasks [#'nix-task #'nix-classpath #'nix-package]}
-  (let [out (apply (case task
-                     "task" nix-task
-                     "classpath" nix-classpath
-                     "package" nix-package
-                     "build-classpath" nix-build-classpath
-                     "dev-classpath" #(nix-classpath %1 (read-string %2))
-                     "descriptor" nix-descriptor)
-                   project args)]
-    (.write *err* (str "LEIN NIX CALLED " (apply pr-str task args) "\n"))
-    (.flush *err*)
-    (.write *out* out)
-    (.flush *out*)))
+  (if (and (:root project) (not= task "preload"))
+    (let [out (apply (case task
+                       "task" nix-task
+                       "classpath" nix-classpath
+                       "package" nix-package
+                       "build-classpath" nix-build-classpath
+                       "dev-classpath" #(nix-classpath %1 (read-string %2))
+                       "descriptor" nix-descriptor)
+                     project args)]
+      (.write *err* (str "LEIN NIX CALLED " (apply pr-str task args) "\n"))
+      (.flush *err*)
+      (.write *out* out)
+      (.flush *out*))
+    (case task
+      "preload" (nix-preload project (map symbol args)))))
 
 (comment
   (def prj (prj/read "/home/herwig/src/cc.bendlas.net/project.clj"))

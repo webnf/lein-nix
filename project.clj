@@ -14,5 +14,4 @@
                  [org.apache.maven.wagon/wagon-provider-api "2.10"]
                  [org.apache.maven.wagon/wagon-http "2.10"]
                  [org.apache.maven.wagon/wagon-ssh "2.10"]]
-  ;:eval-in-leiningen true
-  )
+  :eval-in-leiningen true)

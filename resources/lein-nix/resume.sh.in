@@ -1,0 +1,18 @@
+#!@shell@
+
+set -e
+
+WD=$1
+shift
+ARGS=$(for a in "$@"; do
+           local esc=$(echo "$a" | sed 's#"#\\"#')
+           print "\"$esc\""
+       done)
+
+echo "Resuming vm at @imagesDir@
+         in '$WD'
+  with args ($ARGS)" > &2
+
+exec @criu@/bin/criu restore -D "@imagesDir@" -W "$WD" <<ARGSEOF
+($ARGS)
+ARGSEOF

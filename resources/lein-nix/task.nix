@@ -15,7 +15,7 @@ in stdenv.mkDerivation {
     java="${jre}/bin/java"
     javaArgs='${lib.concatStringsSep " " desc.javaArgs}'
     shell="${stdenv.shell}"
-    substituteAll ${./start.tmpl.sh} $out/bin/run-${desc.name}
+    substituteAll ${./start.sh.in} $out/bin/run-${desc.name}
     chmod +x $out/bin/run-${desc.name}
   '';
 }

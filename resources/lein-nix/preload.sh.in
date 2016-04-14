@@ -1,0 +1,41 @@
+#!@shell@
+
+set -e
+
+IFS=$'\n'
+whoami
+groups
+state=wait-pid
+echo 'Running echo "$$"; exec @preloadJob@'
+exec < <(tail -f /dev/null)
+while read -r line; do
+    case $state in
+        wait-pid)
+            PID=$line
+            state=wait-preload
+            echo "Got PID $PID"
+            ;;
+        wait-preload)
+            if [ "$line" == "READY FOR RESUME" ]; then
+                echo "Got preload '$line', freezing $PID to @imagesDir@"
+                @criu@/bin/criu dump -j -t $PID -D "@imagesDir@"
+            else
+                echo "ERROR Invalid control sequence"
+                echo $line
+                state=err
+            fi
+            ;;
+        err) echo "$line"
+             ;;
+        *) echo "ERROR Invalid control sequence"
+           echo $line
+           state=err
+           ;;
+    esac
+done < <(/var/setuid-wrappers/@preloadUser@-sh -c 'echo "$$"; exec @preloadJob@')
+if [ "$state" == "err" ]; then
+   echo "Finished with error"
+   exit 1
+else
+    echo "Dumped to @imagesDir@"
+fi
