@@ -7,13 +7,13 @@
    (org.eclipse.aether.repository LocalRepository RemoteRepository$Builder)
    (org.apache.maven.repository.internal MavenRepositorySystemUtils)
    (org.apache.maven.wagon.providers.http HttpWagon)
+   (org.apache.maven.artifact.versioning DefaultArtifactVersion ArtifactVersion)
    org.eclipse.aether.graph.Dependency
    org.eclipse.aether.graph.Exclusion
    org.eclipse.aether.artifact.Artifact
    org.eclipse.aether.artifact.DefaultArtifact
    (org.eclipse.aether.collection CollectRequest)
-   org.eclipse.aether.metadata.Metadata
-   org.eclipse.aether.metadata.DefaultMetadata
+   (org.eclipse.aether.metadata Metadata Metadata$Nature DefaultMetadata)
    org.eclipse.aether.resolution.VersionResult
    org.eclipse.aether.resolution.VersionRequest
    org.eclipse.aether.resolution.VersionResolutionException
@@ -186,6 +186,9 @@
   [[group-artifact version & {:keys [scope optional exclusions]} :as dep-spec]]
   (DefaultArtifact. (coordinate-string dep-spec)))
 
+(defc version ArtifactVersion [s]
+  (DefaultArtifactVersion. s))
+
 (defc dependency Dependency
   [[group-artifact version & {:keys [scope optional exclusions]
                               :as opts
@@ -205,3 +208,17 @@
   (.readArtifactDescriptor
    system session
    (ArtifactDescriptorRequest. (artifact dep) repositories nil)))
+
+(defn )
+
+(defn version-resolution [art {:keys [system session repositories] :as conf}]
+  (.resolveVersion system session (VersionRequest. (artifact art) repositories nil)))
+
+(defc metadata Metadata [art]
+  (let [a (artifact art)]
+    (DefaultMetadata.
+     (.getGroupId a)
+     (.getArtifactId a)
+     (.getVersion a)
+     "maven-metadata.xml"
+     Metadata$Nature/RELEASE_OR_SNAPSHOT)))

@@ -12,6 +12,7 @@
    (org.eclipse.aether.graph Dependency Exclusion DependencyNode)
    org.eclipse.aether.artifact.Artifact
    org.eclipse.aether.artifact.DefaultArtifact
+   org.apache.maven.artifact.versioning.DefaultArtifactVersion
    org.eclipse.aether.metadata.Metadata
    org.eclipse.aether.metadata.DefaultMetadata
    org.eclipse.aether.resolution.VersionResult
@@ -31,6 +32,7 @@
    (org.eclipse.aether.transport.file FileTransporterFactory)
    (org.eclipse.aether.transport.wagon WagonProvider WagonTransporterFactory))
   (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             (leiningen.nix.deps
              [cons :as cons]
              [uncons :as uncons])))
@@ -49,21 +51,17 @@
       (io/file ".m2" "repository")
       cons/local-repository))
 
-(defn- dependency-graph
-  ([node]
-   (reduce (fn [g ^DependencyNode n]
-             (if-let [dep (.getDependency n)]
-               (update-in g [(uncons/dep-spec dep)]
-                          clojure.set/union
-                          (->> (.getChildren n)
-                               (map #(.getDependency %))
-                               (map uncons/dep-spec)
-                               set))
-               g))
-           {}
-           (tree-seq (constantly true)
-                     #(seq (.getChildren %))
-                     node))))
+(defn memoize-singular [f]
+  (let [memo (atom {})]
+    (fn [& args]
+      (if-let [v (get @memo args)]
+        @v
+        @(get (swap! memo (fn [m]
+                            (let [prev-delay (get m args)]
+                              (if (nil? prev-delay)
+                                (assoc m args (delay (apply f args)))
+                                m))))
+              args)))))
 
 (defn collect-deps [deps {:as config :keys [system session repositories]}]
   (-> (.collectDependencies system session (cons/collection-request deps config))
@@ -75,34 +73,49 @@
    (.getVersion art)
    (.getClassifier art)])
 
-(defn download-info [arti {:as config}]
-  (let [art (cons/artifact arti)
-        desc (cons/artifact-descriptor art config)]
-    
-    (if-let [layout (try (cons/repository-layout (.getRepository desc) config)
-                         (catch Exception e
-                           (println "ERROR" "no download info" (art-key art) (.getRepository desc))))]
-      (let [base (.. desc getRepository getUrl)
-            loc (.getLocation layout art false)
-            cs-loc (some #(when (= "SHA-1" (.getAlgorithm %))
-                            (.getLocation %))
-                         (.getChecksums layout art false loc))]
-        {:art art
-         :desc desc
-         :location loc
-         :cs-location cs-loc
-         :base base
-         :sha-1 (try (slurp (str base cs-loc))
-                     (catch Exception e
-                       (println "ERROR" "couldn't fetch sha-1" base cs-loc)
-                       nil))})
-      {:desc desc :art art})))
+(defn coordinate* [art]
+  [(.getGroupId art)
+   (.getArtifactId art)
+   (.getVersion art)])
 
 (defn get-dependencies [desc done {:keys [include-optionals include-scopes]}]
   (->> (cond-> (.getDependencies desc)
          (not include-optionals) (->> (remove #(.isOptional %))))
        (filter #(contains? include-scopes (.getScope %)))
        (remove #(contains? done (art-key (.getArtifact %))))))
+
+(defn download-info [arti {:as config}]
+  (let [art (cons/artifact arti)
+        rv (.getVersion (or (cons/version-resolution art config)
+                            art))
+        rart (cons/artifact [(keyword (.getGroupId art)
+                                      (.getArtifactId art))
+                             rv])
+        desc (cons/artifact-descriptor rart config)]
+    
+    (if-let [layout (try (cons/repository-layout (.getRepository desc) config)
+                         (catch Exception e
+                           (println "ERROR" "no download info" (art-key rart) (.getRepository desc))))]
+      (let [base (.. desc getRepository getUrl)
+            loc (.getLocation layout rart false)
+            cs-loc (some #(when (= "SHA-1" (.getAlgorithm %))
+                            (.getLocation %))
+                         (.getChecksums layout rart false loc))]
+        (cond-> {:art art
+                 :desc desc
+                 :location loc
+                 :cs-location cs-loc
+                 :base base
+                 :coord (coordinate* art)
+                 :deps (mapv #(coordinate* (.getArtifact %))
+                             (get-dependencies desc #{} config))
+                 :sha1 (try (slurp (str base cs-loc))
+                            (catch Exception e
+                              (println "ERROR" "couldn't fetch sha-1" base cs-loc)
+                              nil))}
+          (.isSnapshot art) (assoc :snapshot true)
+          (not= rv (.getVersion art)) (assoc :resolved-version rv)))
+      {:desc desc :art art})))
 
 (defn expand-download-info
   ([art conf] (expand-download-info art conf #{}))
@@ -123,15 +136,13 @@
                                         ;[res (mapcat deref thunks)]
       (cons res (mapcat deref thunks))))))
 
-(defn coordinate* [art]
-  [(.getGroupId art)
-   (.getArtifactId art)
-   (.getVersion art)])
+(defn expand-download-infos
+  ([artifacts conf] (mapcat #(expand-download-info % conf) artifacts)))
 
 (defn checksums-for [download-infos]
-  (reduce (fn [res {:keys [art sha-1]}]
+  (reduce (fn [res {:keys [art sha1]}]
             (update-in res (coordinate* art)
-                       #(let [v ["mvn" sha-1]]
+                       #(let [v ["mvn" sha1]]
                           (when (and (some? %) (not= % v))
                             (throw (ex-info (str "SHA-1 mismatch " % v) {:old % :new v})))
                           v)))
@@ -150,10 +161,75 @@
                     res)))))
           {} download-infos))
 
+(defn index-download-infos [download-infos]
+  (reduce (fn [res {:as dli :keys [art]}]
+            (assoc-in res (coordinate* art) dli))
+          {} download-infos))
+
+(defn map-vals [f m]
+  (into {} (map (juxt key (comp f val)) m)))
+
+(defn max-key*
+  "Returns the x for which (k x), is greatest."
+  {:added "1.0"
+   :static true}
+  ([k x] x)
+  ([k x y] (if (pos? (compare (k x) (k y))) x y))
+  ([k x y & more]
+   (reduce #(max-key* k %1 %2) (max-key* k x y) more)))
+
+(defn max-version [version-map]
+  (apply max-key* cons/version (keys version-map)))
+
+(defn add-defaults [g-map]
+  (map-vals
+   (fn [a-map]
+     (map-vals
+      (fn [v-map]
+        (assoc v-map "DEFAULT"
+               ["alias" (max-version v-map)]))
+      a-map))
+   g-map))
+
 (defn repo-info [artifacts config]
-  (let [dl (mapcat #(expand-download-info % config) artifacts)]
-    {:checksums (checksums-for dl)
+  (let [dl (expand-download-infos artifacts config)]
+    {:checksums (add-defaults (checksums-for dl))
+     :roots (mapv (comp (juxt #(.getGroupId %)
+                              #(.getArtifactId %)
+                              #(.getVersion %))
+                        cons/artifact)
+                  artifacts)
      :dependencies (dep-graph-for dl config)}))
+
+(defn classpath-for* [dl-infos config]
+  (fn this [init roots]
+    (reduce (fn [init' [group artifact orig-version]]
+              (if (get-in init' [:added group artifact])
+                (update-in init' [:added group artifact]
+                           (fn [{:keys [updated-from]
+                                 [_ _ version] :coord
+                                 :or {updated-from #{}}
+                                 :as dli}]
+                             (cond-> dli (not= version orig-version)
+                                     (assoc :updated-from (conj updated-from orig-version)))))
+                (let [version (max-version (get-in dl-infos [group artifact]))
+                      dli (get-in dl-infos [group artifact version])]
+                  (-> init'
+                      (assoc-in [:added group artifact] dli)
+                      (this (:deps dli))
+                      (update :suffix conj [group artifact])))))
+            init (rseq roots))))
+
+(defn classpath-for [roots config]
+  (let [dl (index-download-infos
+            (expand-download-infos roots config))
+        {:keys [suffix added]} ((classpath-for* dl config)
+                                {:suffix () :added {}}
+                                (mapv #(coordinate* (cons/artifact %)) roots))]
+    (for [s suffix
+          :let [{:keys [art loc updated-from snapshot] :as dli}
+                (get-in added s)]]
+      (select-keys dli [:coord :sha1 :updated-from :resolved-version]))))
 
 (defn merge-aether-config [prev-config & {:as next-config}]
   (let [{:keys [system session local-repo offline transfer-listener
@@ -172,20 +248,49 @@
           (assoc config :repositories (cons/repositories (or repositories default-repositories) config))
           
           (assoc config :m-dl-info
-                 (memoize #(download-info % config)))))))
+                 (memoize-singular #(download-info % config)))))))
 
 (defn aether-config [& {:keys [system session local-repo offline transfer-listener mirror-selector repositories] :as config}]
   (merge-aether-config config))
 
 
 (comment
-  (clojure.pprint/pprint
-   (let [cfg (aether-config
-              :include-optionals false
-              :include-scopes #{"compile" "provided" "system"})]
-     (repo-info
-      '[[webnf.deps/logback "0.1.18"]]
-      cfg))))
+  (def cfg (aether-config
+            :include-optionals false
+            :include-scopes #{"compile" #_"provided"}))
+  (def cp (classpath-for '[[org.clojure/clojure "1.9.0-alpha14"]
+                           [webnf/base "0.2.0-SNAPSHOT"]
+                           [org.apache.maven/maven-aether-provider "3.3.9"]
+                           [org.eclipse.aether/aether-transport-file "1.1.0"]
+                           [org.eclipse.aether/aether-transport-wagon "1.1.0"]
+                           [org.eclipse.aether/aether-connector-basic "1.1.0"]
+                           [org.apache.maven.wagon/wagon-provider-api "2.10"]
+                           [org.apache.maven.wagon/wagon-http "2.10"]
+                           [org.apache.maven.wagon/wagon-ssh "2.10"]]
+                         cfg))
+  )
+
+
+#_(comment
+    (def ri (let [cfg (aether-config
+                       :include-optionals false
+                       :include-scopes #{"compile" #_"provided"})]
+              (repo-info
+               '[#_[org.eclipse.jetty/jetty-webapp "9.3.6.v20151106"]
+                 #_[webnf.deps/logback "0.1.18"]
+                 #_[webnf/base "0.1.18"]
+                 [org.clojure/clojure "1.9.0-alpha14"]
+                 [org.apache.maven/maven-aether-provider "3.3.9"]
+                 [org.eclipse.aether/aether-transport-file "1.1.0"]
+                 [org.eclipse.aether/aether-transport-wagon "1.1.0"]
+                 [org.eclipse.aether/aether-connector-basic "1.1.0"]
+                 [org.apache.maven.wagon/wagon-provider-api "2.10"]
+                 [org.apache.maven.wagon/wagon-http "2.10"]
+                 [org.apache.maven.wagon/wagon-ssh "2.10"]]
+               cfg)))
+    (clojure.pprint/pprint ri)
+    (require 'nix.data)
+    (print (nix.data/render ri)))
 
 #_(take 2 (expand-download-info '[webnf.deps/universe "0.1.18"]
                                 (aether-config)))

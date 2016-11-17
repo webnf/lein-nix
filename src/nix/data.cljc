@@ -37,11 +37,11 @@
        (emit-expr [_]
          (binding [*indent* indent#
                    *pprint* pprint#]
-           ~frag)))))
+           (doall ~frag))))))
 
 (defmacro inc-indent [& body]
   `(binding [*indent* (cons "  " *indent*)]
-     ~@body))
+     (doall ~@body)))
 
 (defn emit-ppstr [s]
   (if (or (not *pprint*) (re-find #"''" s))
@@ -75,7 +75,8 @@
         (emit-nl)
         (emit-key k)
         [" = "]
-        (inc-indent (emit-expr v))
+        #_(inc-indent (emit-expr v))
+        (emit-expr v)
         [";"]))
      m))
    (emit-nl)
