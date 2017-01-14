@@ -69,15 +69,16 @@
   (concat
    ["{"]
    (inc-indent
-    (mapcat
-     (fn [[k v]]
-       (concat
-        (emit-nl)
-        (emit-key k)
-        [" = "]
-        (inc-indent (emit-expr v))
-        [";"]))
-     m))
+    (doall
+     (mapcat
+      (fn [[k v]]
+        (concat
+         (emit-nl)
+         (emit-key k)
+         [" = "]
+         (emit-expr v)
+         [";"]))
+      m)))
    (emit-nl)
    ["}"]))
 
