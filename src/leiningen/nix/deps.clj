@@ -29,7 +29,8 @@
    org.eclipse.aether.transfer.NoTransporterException
    (org.eclipse.aether.spi.connector.transport TransporterFactory)
    (org.eclipse.aether.transport.file FileTransporterFactory)
-   (org.eclipse.aether.transport.wagon WagonProvider WagonTransporterFactory))
+   (org.eclipse.aether.transport.wagon WagonProvider WagonTransporterFactory)
+   org.eclipse.aether.util.version.GenericVersionScheme)
   (:require [clojure.java.io :as io]
             (leiningen.nix.deps
              [cons :as cons]
@@ -179,40 +180,93 @@
 
 
 (comment
+
   (clojure.pprint/pprint
    (let [cfg (aether-config
               :include-optionals false
               :include-scopes #{"compile" "provided" "system"})]
      (repo-info
-      '[[webnf.deps/logback "0.1.18"]]
-      cfg))))
+      '[[webnf.deps/logback "0.2.0-alpha1"]]
+      cfg)))
 
-#_(take 2 (expand-download-info '[webnf.deps/universe "0.1.18"]
-                                (aether-config)))
+  )
 
-#_(comment
+(def gvs (GenericVersionScheme.))
 
-    (def dep-node (collect-deps
-                   '[[webnf.deps/universe "0.2.0-SNAPSHOT"]]
-                   (aether-config)))
+(defn- compare-versions [v1 v2]
+  (compare (.parseVersion gvs v1)
+           (.parseVersion gvs v2)))
 
-    (-> dep-node first
-        .getDependency
-        .getArtifact
-        (ArtifactDescriptorRequest. ))
+(defn- unify-versions [result artifacts fixed-versions dependencies]
+  (reduce (fn [r [group artifact version :as desc]]
+            (let [version* (get-in r [group artifact])]
+              (if (or (nil? version*) (neg? (compare-versions version version*)))
+                (unify-versions (assoc-in r [group artifact] version)
+                                (get-in dependencies [group artifact version])
+                                fixed-versions dependencies)
+                r)))
+          result artifacts))
 
-    (def art-desc
-      (cons/artifact-descriptor '[webnf/base "0.1.18"] ;;'[org.springframework/spring-beans "1.0-m4"]
-                                (aether-config)))
+(defn- expand-deps* [artifacts version-map dependencies]
+  (mapcat (fn [[group art _]]
+            (let [version (get-in version-map [group art])]
+              (cons [group art]
+                    (expand-deps* (get-in dependencies [group art version])
+                                  version-map dependencies))))
+          artifacts))
 
-    (.getDependencies art-desc)
-    (.getRepository art-desc)
-  
+(defn expand-deps [artifacts fixed-versions info]
+  (let [version-map (unify-versions {} artifacts fixed-versions (:dependencies info))]
+    (->> (expand-deps* artifacts version-map (:dependencies info))
+         reverse distinct reverse
+         (mapv (fn [[g a :as ga]]
+                 [g a (get-in version-map ga)])))))
 
-    (cons/repository-layout (cons/repository (first default-repositories)) (aether-config))
-  
-    (download-info '[webnf.deps/universe "0.1.18"]
-                   (aether-config))
+(comment
 
-    (aether-config)
-    )
+  (let [cfg (aether-config
+             :include-optionals false
+             :include-scopes #{"compile" #_"provided" #_"system"})
+        info (repo-info
+              '[[webnf.deps/logback "0.2.0-alpha1"]]
+              cfg)]
+    (clojure.pprint/pprint
+     #_info
+     (expand-deps [#_["webnf.deps" "logback" "0.2.0-alpha1"]
+                   ["ch.qos.logback" "logback-classic" "1.1.8"]]
+                  {} #_{"ch.qos.logback" {"logback-classic" "CUSTOM"}}
+                  info)))
+
+  )
+
+(defn clj-dep->nix-dep [[group-artifact version]]
+  [(or (namespace group-artifact) (name group-artifact))
+   (name group-artifact)
+   version])
+
+(comment
+
+  (require 'nix.data)
+
+  (let [aether-deps '[[org.clojure/clojure "1.9.0-alpha14"]
+                      [org.apache.maven/maven-aether-provider "3.3.9"]
+                      [org.eclipse.aether/aether-transport-file "1.1.0"]
+                      [org.eclipse.aether/aether-transport-wagon "1.1.0"]
+                      [org.eclipse.aether/aether-connector-basic "1.1.0"]
+                      [org.apache.maven.wagon/wagon-provider-api "2.10"]
+                      [org.apache.maven.wagon/wagon-http "2.10"]
+                      [org.apache.maven.wagon/wagon-ssh "2.10"]]
+        expansion-deps '[[org.clojure/clojure "1.9.0-alpha14"]
+                         [org.eclipse.aether/aether-util "1.1.0"]]
+
+        cfg (aether-config
+             :include-optionals false
+             :include-scopes #{"compile"})
+        repo (repo-info (concat aether-deps expansion-deps) cfg)]
+    (spit "repo.nix" (nix.data/render repo))
+    (spit "expansion.expanded.deps.nix" (nix.data/render
+                                         (expand-deps (map clj-dep->nix-dep expansion-deps)
+                                                      {} repo)))
+    (spit "aether.deps.nix" (nix.data/render (mapv clj-dep->nix-dep aether-deps))))
+
+  )
